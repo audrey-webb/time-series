@@ -1,5 +1,5 @@
 ---
-title: "Examining Health and Personal Care Store Sales from a Time Series Perspective"
+title: "Examining Health and Personal Care Store Sales from a Time Series" Perspective"
 author: "Audrey Webb"
 date: "12/08/2017"
 output: pdf_document
