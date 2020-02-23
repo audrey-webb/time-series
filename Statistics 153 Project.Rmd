@@ -1,0 +1,823 @@
+---
+title: "Examining Health and Personal Care Store Sales from a Time Series Perspective"
+author: "Audrey Webb"
+date: "12/08/2017"
+output: pdf_document
+---
+
+The reason I use Arima function and forecast function:
+Arima calls stats::arima for the estimation, but stores more information in the returned object. It also allows some additional model functionality such as including a drift term in a model with a unit root.
+
+forecast calls stats::predict to generate the forecasts. It will automatically handle the drift term from Arima. It returns a forecast object (rather than a simple list) which is useful for plotting, displaying, summarizing and analysing the results.
+
+
+```{r, echo = FALSE}
+library(readr)
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+
+library(tseries)
+library(TSA)
+library(forecast)
+library(ggplot2)
+library(zoo)
+library(reshape2)
+
+library(quantmod)
+library(rugarch)
+library(fGarch)
+library(PerformanceAnalytics)
+```
+
+#Data Cleaning
+#Download & Clean census data
+#Part of my data cleaning is taking care of missing values 
+```{r}
+data = read.table("~/Documents/census.txt", header = TRUE, sep = "_", stringsAsFactors = FALSE)
+
+separate.df = data %>% separate(HEALTH...PERSONAL.CARE.STORES, c("Year","January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"))
+
+separate.df = separate.df[2:27,]
+rownames(separate.df) = separate.df[,1]
+separate.df = separate.df[,-1]
+data = separate.df
+u = unlist(data)
+u = as.numeric(u)
+is.vector(u)
+is.numeric(u)
+```
+```{r}
+#make it a time series object
+u.ts = ts(u, start = c(1992,1), frequency = 12)
+is.ts(u.ts)
+
+#remove missing values
+u.ts = na.remove(u.ts)
+
+#observe time series object
+u.ts
+head(u.ts)
+tail(u.ts)
+start(u.ts)
+end(u.ts)
+summary(u.ts)
+plot.ts(u.ts, xlab = "Years", ylab = "Sales Values", main = "Total Sales from Years 1992 to 2017")
+tsdisplay(diff(log(u.ts)))
+```
+Our total data is seasonal.
+
+#Exploratory Data Analysis (EDA) 
+1) Let's look at the seasonal plots
+```{r}
+#entire data set
+par(mfrow = c(2,1))
+acf(u.ts, lag.max = 100, main = "Series 1992-2017") 
+pacf(u.ts, lag.max = 100, main = " ")
+
+seasonplot(u.ts, ylab = "Sales Values", main = "Seasonal plot: health and personal care store sales (1992-2017)", col = c("blue", "black"), year.labels = TRUE,year.labels.left = TRUE)
+
+ggseasonplot(u.ts, main = "Seasonal plot: total store sales (1992-2017)", ylab = "Sales Values",col = rainbow(12), year.labels = TRUE,year.labels.left = TRUE)
+```
+  We take acf with lag.max = 100, and this shows that our data is very seasonal. Note the peaks occur at lags of 12 months, because January of one year correlates to January of another year and so on and so forth, for example. Clearly seasonal with possible trend. Let's decompose the data in order to smooth the data's trend and seasonality. 
+
+Due to the fact that our plotted data shows seasonal variatioin is relatively constant over time, I decided to use the additive model decomposition. 
+#Decompose data because our data looks to have some trend. We will also plot the decomposed seasonal data and compare it to previous seasonal plots. Deconstructing the series can help you understand its behavior and prepare a foundation for building a forecasting model.
+#Level: the average value in the series
+#Trend: the increasing or decreasing value in the series
+#Seasonality: the repeating short-term cycle in the series
+#Noise: the random variation in the series
+
+```{r}
+u.decomp = decompose(u.ts)
+plot(u.decomp)
+```
+We now have a de-seasonalized series, which we will confirm using our plots.  
+```{r}
+#Now, looking at seasonality after decomposing 
+par(mfrow = c(2,1))
+acf(u.decomp$x, lag.max = 100, main = "Series 1992-2017")
+pacf(u.decomp$x, lag.max = 100, main = " ")
+
+par(mfrow = c(2,1))
+acf(u.decomp$x, main = "Series 1992-2017")
+pacf(u.decomp$x, main = " ")
+
+seasonplot(u.decomp$seasonal, main = "Seasonal plot: health and personal care store sales (1992-2017)", col = c("blue", "black"), year.labels = TRUE,year.labels.left = TRUE)
+
+ggseasonplot(u.decomp$seasonal, main = "Seasonal plot: health and personal care store sales (1992-2017)", col = rainbow(12), year.labels = TRUE, year.labels.left = TRUE)
+```
+  Large spike at lag 1 followed by a decreasing wave that alternates between positive and negative correlations show that our data is seasonal.
+  This is the data plotted against the individual "seasons" in which the data is observed. In our case, "season" is a month. This is similar to our above time plots, except that the data from each season is overlapped. This enables the underlying seasonal pattern to be seen more clearly (as well as the trend which we minimize using decomposition), and also allows any substantial departures from the seasonal pattern to be easily identified. 
+
+```{r}
+#seasonal or other subseries from a time series 
+monthplot(u.decomp$seasonal, ylab = "Decomposed Values", main = "Subseries Plot (1992-2017)")
+```
+Data for each seasonal collected together in time plot as separate time series. It also enables the underlying seasonal pattern to be seen clearly, and changes in seasonality over time to be visualized. 
+
+#In order to fit time series models, we want our data to have a constant mean and variance.Now, let's check if our data has constant variance through looking at our log transformation.
+```{r}
+#fix variance & stabilizes a strong growth trends (if any is present):
+log(u.decomp$x)
+plot(log(u.decomp$x), xlab = "Years", ylab = "Logged Values", main = "Log of Sales (1992-2017)")
+
+par(mfrow = c(2,1))
+acf(log(u.decomp$x), main = "Log of Sales (1992-2017)")
+pacf(log(u.decomp$x), main = " ")
+```
+Looks to be the same as when we didn't use log, so we conclude variance is constant. Thus, we don't need to use the log transformation. 
+
+acf and pacf plots in order to determine differencing needed (if any). 
+```{r}
+plot(diff(u.decomp$x), ylab = " ", main = "Seasonal Difference of Sales (1992 - 2017)")
+
+par(mfrow = c(2,1))
+acf(diff(u.decomp$x), main = "Series 1992-2017")
+pacf(diff(u.decomp$x), main = " ")
+```
+
+#Now, let's check if our data is stationary through the use of adf.test and kpss.test. We will use adf.test, and 
+#Adjusted Dickey Fuller Test
+#H0 = data is not stationary
+#H1 = data is stationary
+#Specified alpha is 0.05. 
+```{r}
+#Used to check stationarity
+adf.test(u.decomp$x, alternative="stationary",k=12)
+
+adf.test(log(u.decomp$x), alternative="stationary",k=12)
+```
+Shows data is stationary as it has a p-value of 0.01. So, we reject the null hypothesis and conclude data is stationary. Means that the mean and variance of our data is constant over time. Let's do another test to confirm results. 
+#Kwiatkowski-Phillips-Schmidt-Shin (KPSS) 
+#H0 = data is stationary
+#H1 = data is not stationary
+#Specified alpha is 0.05
+```{r}
+kpss.test(u.decomp$x, null = "Trend")
+kpss.test(u.decomp$x, null = "Level")
+```
+Our pvalue is 0.1, which is larger than our specified alpha, so we fail to reject the null. So, both tests conclude our data is stationary. This means our stationary series mean, variance, and autocovariance are time invariant. This is important for future models, like ARIMA, like since ARIMA uses previous lags of series to model its behavior, modeling stable series with consistent properties involves less uncertainty.
+
+ It is important to remember that ARIMA is a method to linearly model the data and the forecast width remains constant because the model does not reflect recent changes or incorporate new information. In other words, it provides best linear forecast for the series, and thus plays little role in forecasting model nonlinearly
+
+##Now, we need to split our decomposed data set into training and test sets to carry out future model fits, prediction, and forecasting future sales. 
+```{r}
+#training set
+#use data from 1992 to 2014 (15 year difference) for forecasting
+train.ts = window(u.ts, start = 1992, end = 2014, frequency =12)
+train.ts
+head(train.ts)
+tail(train.ts)
+length(train.ts) #264
+
+#decompose 
+decomp.train.ts = decompose(train.ts)
+
+#training set 
+plot(decomp.train.ts)
+
+seasonplot(decomp.train.ts$seasonal, main = "Seasonal plot: health and personal care store sales (1992-2014)", col = c("blue", "black"), year.labels = TRUE,year.labels.left = TRUE)
+
+ggseasonplot(decomp.train.ts$seasonal, main = "Seasonal plot: health and personal care store sales (1992-2014)", col = rainbow(12), year.labels = TRUE, year.labels.left = TRUE)
+
+#seasonal or other subseries from a time series
+monthplot(decomp.train.ts$seasonal, ylab = "Decomposed Values", main = "Subseries Plot (1992-2014)")
+```
+
+```{r}
+#test set
+#use remaining data from 2015 to 2017 (9 year difference) to test prediction accuracy
+test.ts = window(u.ts, start = 2015, end = 2017, frequency = 12)
+test.ts
+head(test.ts)
+tail(train.ts)
+length(test.ts) #24
+start(test.ts) #2015.074
+end(test.ts) #2016.997
+
+#decompose 
+decomp.test.ts = decompose(test.ts)
+
+#test set
+plot(decomp.test.ts)
+
+seasonplot(decomp.test.ts$seasonal, main = "Seasonal plot: health and personal care store sales (1992-2014)", col = c("blue", "black"), year.labels = TRUE,year.labels.left = TRUE)
+
+ggseasonplot(decomp.test.ts$seasonal, main = "Seasonal plot: health and personal care store sales (1992-2014)", col = rainbow(12), year.labels = TRUE, year.labels.left = TRUE)
+
+#seasonal or other subseries from a time series
+monthplot(decomp.test.ts$seasonal, ylab = "Decomposed Values", main = "Subseries Plot (2015-2017)")
+```
+This is multivariate time series data. The training set makes up years 1992 to 2014 and test set makes up 2015 to 2017. We will fit numerous models on our training set, and use these fitted models to make a prediction on the test set. From this we will show our forecast as well as plots of residuals. 
+
+Due to the fact we removed missing values, our ts object has made our time stamps a bit different. We have missing values because our data stops in October of 2017. This is why you don't see absolute values when we look at the start and end of the test, training, and original data sets.
+
+#I checked that the dates I extracted from original data set is accurate by subsetting our data set directly and plotting that. Same results as our above train which was created using window function. 
+```{r}
+u.ts[1:276]
+plot.ts(u.ts[1:276], xlab = "Years", ylab = "Sales Values", main = "Total Sales from Years 1992 to 2014")
+```
+#This is the end of our EDA. 
+#From now on, all the analysis we do from now on will be on our decomposed training and test sets. 
+ 
+ 
+##Time-Series Analysis, Frequency-Side Analysis, or a Hybrid
+#Seasonal ARIMA
+  Here, we use acf, pacf, and eacf to estimate our seasonal ARIMA orders.
+  We try numerous different seasonal ARIMA models in order to see which follows our actual data best. We will use auto.arima to show that our estimates are better than that given by auto.arima.
+We will be doing this on our training set since we will be fitting the seasonal ARIMA model on our training set. 
+  ACF plots display correlation between a series and its lags. In addition to suggesting the order of differencing, ACF plots can help in determining the order of the M A (q) model. Partial autocorrelation plots (PACF), as the name suggests, display correlation between a variable and its lags that is not explained by previous lags. PACF plots are useful when determining the order of the AR(p) model.
+```{r}
+Acf(decomp.train.ts$x, lag = 12, main = "")
+Pacf(decomp.train.ts$x, lag = 12, main = "")
+```
+  
+```{r}
+#Fit 1 (p=1,d=0,q=1)
+fit1 = Arima(decomp.train.ts$x, c(1, 0, 1),seasonal = list(order = c(0, 1, 1), period = 12))
+summary(fit1)
+
+#prediction
+pred1 <- predict(fit1, decomp.test.ts$x)
+
+#plot data and prediction for 3 time periods/years (so forecast 2014-2019)
+plot(forecast(fit1, h = 36, type = "o"), xlab = "Years", ylab = "Sales")
+```
+ 
+```{r}
+#Fit 2 (p=1,d=0,q=2)
+fit2 = Arima(decomp.train.ts$x, c(1, 0, 2),seasonal = list(order = c(1, 1, 1), period = 12))
+summary(fit2)
+
+#prediction
+pred2 <- predict(fit2, decomp.test.ts$x)
+
+#plot data and prediction for 3 years (so forecast 2014-2019)
+plot(forecast(fit2, h = 36, type = "o"), xlab = "Years", ylab = "Sales")
+```
+ 
+```{r}
+#Fit 3 (p=2,d=0,q=1)
+fit3 = Arima(decomp.train.ts$x, c(2, 0, 1),seasonal = list(order = c(0, 2, 1), period = 12))
+summary(fit3)
+
+#prediction
+pred3 <- predict(fit3, decomp.test.ts$x)
+
+#plot data and prediction for 3 years (so forecast 2014-2019)
+plot(forecast(fit3, h = 36, type = "o"), xlab = "Years", ylab = "Sales")
+
+plot(residuals(fit3))
+plot(residuals(fit3))
+```
+
+```{r}
+#Fit 4 (p=2,d=0,q=2)
+fit4 = Arima(decomp.train.ts$x, c(2, 0, 2),seasonal = list(order = c(1, 2, 1), period = 12))
+summary(fit4)
+
+#prediction
+pred4 <- predict(fit4, decomp.test.ts$x)
+
+#plot data and prediction for h=36 (so forecast ?)
+plot(forecast(fit4, h = 36, type = "o"), xlab = "Years", ylab = "Sales")
+```
+
+Choose the model that appeared to have the best forecast, best residuals(should have no patterns & be normally distributed), and smallest AIC & BIC.  
+```{r}
+qqnorm(fit1$residuals)
+qqline(fit1$residuals, col = "blue")
+hist(fit1$residuals, xlab ="", main = "Histogram of Fit 1 Residuals")
+skewness(fit1$residuals)
+tsdisplay(residuals(fit1))
+tsdiag(fit1)
+```
+left skew, and clear pattern present in ACF/PACF. This suggests that our model may be better off with a different specification. 
+```{r}
+qqnorm(fit2$residuals)
+qqline(fit2$residuals, col = "blue")
+hist(fit2$residuals, xlab ="", main = "Histogram of Fit 2 Residuals")
+skewness(fit2$residuals)
+tsdisplay(residuals(fit2))
+tsdiag(fit2)
+```
+left skew, and clear pattern present in ACF/PACF. This suggests that our model may be better off with a different specification. 
+```{r}
+qqnorm(fit3$residuals)
+qqline(fit3$residuals, col = "blue")
+hist(fit3$residuals, xlab ="", main = "Histogram of Fit 3 Residuals")
+skewness(fit3$residuals)
+tsdisplay(residuals(fit3))
+tsdiag(fit3)
+```
+clear pattern present in ACF/PACF. This suggests that our model may be better off with a different specification.
+```{r}
+qqnorm(fit4$residuals)
+qqline(fit4$residuals, col = "blue")
+hist(fit1$residuals, xlab ="", main = "Histogram of Fit 4 Residuals")
+skewness(fit4$residuals)
+tsdisplay(residuals(fit4))
+tsdiag(fit4)
+```
+Right skew, and clear pattern present in ACF/PACF. This suggests that our model may be better off with a different specification. 
+```{r}
+qqnorm(fit5$residuals)
+qqline(fit5$residuals, col = "blue")
+hist(fit5$residuals, xlab ="", main = "Histogram of Fit 5 Residuals")
+skewness(fit5$residuals)
+tsdisplay(residuals(fit5))
+tsdiag(fit5)
+```
+left skew, and clear pattern present in ACF/PACF. This suggests that our model may be better off with a different specification. 
+#look at min AIC and BIC amongst all models
+```{r}
+#AIC
+fit1$aic < fit2$aic #yes
+fit1$aic < fit3$aic #no
+fit1$aic < fit4$aic #no
+fit1$aic < fit5$aic #yes
+
+fit3$aic < fit4$aic #no
+#BIC
+fit1$bic < fit2$bic #yes
+fit1$bic < fit3$bic #no
+fit1$bic < fit4$bic #no
+fit1$bic < fit5$bic #yes
+
+fit3$bic < fit4$bic #no
+```
+
+Optimal models seem to be Fit 3 and Fit 4, so we will compare prediction residuals in order to choose the optimal model. 
+```{r}
+qqnorm(pred3$se)
+qqline(pred3$se, col = "blue")
+hist(pred3$se)
+skewness(pred3$se)
+
+qqnorm(pred4$se)
+qqline(pred4$se, col = "blue")
+hist(pred4$se)
+skewness(pred4$se)
+
+
+qqnorm(fit4$residuals)
+qqline(fit4$residuals, col = "blue")
+hist(fit4$residuals)
+skewness(fit4$residuals)
+
+par(mfrow=c(2,1))
+qqnorm(fit4$residuals)
+qqline(fit4$residuals, col = "blue")
+hist(fit4$residuals, main = "Histogram", xlab = "residuals")
+
+par(mfrow=c(2,1))
+acf(fit6$residuals, main = " ARIMA(2,1,2)(1,2,1)[12] Residuals")
+pacf(fit6$residuals, main = " ")
+```
+Optimal seasonal ARIMA is fit 3: ARIMA(2,0,2)(1,2,1)[12].  
+
+
+None of our residuals don't have a normal distribution, we may have variance issues, outliers, or something is missing. Also, found to be serially uncorrelated but admit a higher-order dependence structure, namely volatility clustering, and a heavy-tailed dis- tribution.
+  So, we should try an ARCH/GARCH model which models the variance. 
+  
+
+##ARCH/GARCH 
+#Volatility clustering — the phenomenon of there being periods of relative calm and periods of high volatility — is a seemingly universal attribute of market data.  There is no universally accepted explanation of it. GARCH (Generalized AutoRegressive Conditional Heteroskedasticity) models volatility clustering.
+
+#Let's use garch function to observe the training and test set
+```{r}
+plot(garch(train.ts, order = c(1,1)), which = 1)
+```
+```{r}
+plot(garch(teset.ts, order = c(1,1)))
+```
+
+#I fit a Garch(1,1) model on the tarining set since that is what's typically used.
+```{r}
+g = garchFit(train.ts~garch(1,1))
+plot(garchFit(train.ts~garch(1,1)))
+```
+I used both garch from tseries and garchFit from fGarch, but I prefer garchFit for following reasons (which is why I only included that plot). The garch function from tseries package is fast but does not always find solution. The garchFit function from fGarch package is slower but does converge more consistently. 
+
+# Estimate GARCH(1,0) == ARCH(1)
+```{r}
+# specify GARCH(1,0) model with only constant in mean equation
+arch11.spec = ugarchspec(variance.model = list(garchOrder=c(1,0)), 
+                          mean.model = list(armaOrder=c(0,0)))
+train.arch11.fit = ugarchfit(spec=arch11.spec, data=train.ts,
+                             solver.control=list(trace = 1))       
+class(train.arch11.fit)
+slotNames(train.arch11.fit)
+names(train.arch11.fit@fit)
+names(train.arch11.fit@model)
+
+# show arch fit
+train.arch11.fit
+
+# use extractor functions
+# estimated coefficients
+coef(train.arch11.fit)
+# unconditional mean in mean equation
+uncmean(train.arch11.fit)
+# unconditional variance: omega/(alpha1 + beta1)
+uncvariance(train.arch11.fit)
+# persistence: alpha1 + beta1
+persistence(train.arch11.fit)
+# half-life:
+halflife(train.arch11.fit)
+
+# residuals: e(t)
+plot.ts(residuals(train.arch11.fit), ylab="e(t)", col="blue")
+abline(h=0)
+
+# sigma(t) = conditional volatility
+plot.ts(sigma(train.arch11.fit), ylab="sigma(t)", col="blue")
+
+# illustrate plot method
+plot(train.arch11.fit)
+plot(train.arch11.fit, which=1)
+plot(train.arch11.fit, which=9)
+
+#check ACF of standardized residuals, ACF of squared standardized residuals, summary with tests about standardized residuals and their squares
+```
+
+# Estimate GARCH(1,1)
+```{r}
+# specify GARCH(1,1) model with only constant in mean equation
+garch11.spec = ugarchspec(variance.model = list(garchOrder=c(1,1)), 
+                          mean.model = list(armaOrder=c(0,0)))
+train.garch11.fit = ugarchfit(spec=garch11.spec, data=train.ts,
+                             solver.control=list(trace = 1))                          
+class(train.garch11.fit)
+slotNames(train.garch11.fit)
+names(train.garch11.fit@fit)
+names(train.garch11.fit@model)
+
+# show garch fit
+train.garch11.fit
+
+# use extractor functions
+# estimated coefficients
+coef(train.garch11.fit)
+# unconditional mean in mean equation
+uncmean(train.garch11.fit)
+# unconditional variance: omega/(alpha1 + beta1)
+uncvariance(train.garch11.fit)
+# persistence: alpha1 + beta1
+persistence(train.garch11.fit)
+# half-life:
+halflife(train.garch11.fit)
+
+# residuals: e(t)
+plot.ts(residuals(train.garch11.fit), ylab="white noise", col="blue")
+abline(h=0)
+
+# sigma(t) = conditional volatility
+plot.ts(sigma(train.garch11.fit), ylab="sigma(t)", col="blue")
+
+# illustrate plot method
+plot(train.garch11.fit)
+plot(train.garch11.fit, which=1)
+plot(train.garch11.fit, which=9)
+```
+Does a pretty good job of measuring volatlity...don't know why it's only looking at the year of 1970, though. 
+#results to focus on are pvalue for Ljung test, pvalue for Arch lm (h0 = no Arch effect),# Q-Stat: high p-values idicates little chance for serial correlation  
+# sign bias test; null: no significiant negative and positive reaction shocks (if exist apARCH type models)
+# Goodness of Fit; with 20 to 50 bins of Chi-squared test.
+# Nymblom test: the parameter stability test (should we switch to TGARCH models?) Here Omega and alpha are worth discussing.. But Omega is not stat sign. coefficient..
+
+```{r}
+#50 Day Prediction
+fb1predict = ugarchboot(train.garch11.fit, data = test.ts, method = c("Partial", "Full")[1])
+plot(fb1predict, which = 2)
+
+#50 Day Forecast 
+garch.forecast1 = ugarchforecast(train.garch11.fit, data = test.ts, n.ahead = 50, n.roll = 0, out.sample = 0)
+plot(garch.forecast1, which = 1) 
+
+plot(garch.forecast1@forecast$seriesFor) #shows exponential decay?
+
+fitted(garch.forecast1) #means?
+```
+Forecast looks to average out. This is not true to the real data, so Garch is not modelling better than ARIMA. 
+
+I tried other Garch models and their corresponding forecasts, but I continued to come to the same conclusion. I have included my forecast plots for Garch with free parameters and Garch(2,2). 
+#Fit Garch Model 1 (free parameters)
+```{r}
+#Garch(1,1) fit bc it's default method
+
+#All parameters free 
+fb1 = ugarchspec()
+garch1 = ugarchfit(spec=fb1, data= train.ts)
+garch1
+plot(garch1, which = 3) #results to focus on are pvalue for Ljung test, pvalue for Arch lm (h0 = no Arch effect),# Q-Stat: high p-values idicates little chance for serial correlation  
+# sign bias test; null: no significiant negative and positive reaction shocks (if exist apARCH type models)
+# Goodness of Fit; with 20 to 50 bins of Chi-squared test.
+# Nymblom test: the parameter stability test (should we switch to TGARCH models?) Here Omega and alpha are worth discussing.. But Omega is not stat sign. coefficient..
+```
+
+#Forecast Garch Fit 1
+```{r}
+fb1predict<-ugarchboot(garch1, data = test.ts,n.ahead=10, method=c("Partial","Full")[1])
+plot(fb1predict,which=2)
+
+#50 Day Forecast 
+garch.forecast1 = ugarchforecast(garch1, data = test.ts,n.ahead = 50, n.roll = 0, out.sample = 0)
+plot(garch.forecast1) 
+
+plot(garch.forecast1@forecast$seriesFor) #shows exponential decay?
+
+fitted(garch.forecast1) #means?
+```
+
+
+#Fit Garch Model 1 (specified parameters: garch->2,2 and arma->0,0)
+```{r}
+#Garch 3 fit
+fb3 = ugarchspec(mean.model = list(armaOrder = c(0,0)), 
+               variance.model = list(garchOrder = c(2,2), 
+               model = "sGARCH"), distribution.model = "norm")
+
+garch3 = ugarchfit(fb3, data = train.ts, fit.control=list(scale=TRUE))
+garch3
+plot(garch3, which = 3)
+
+#volatility clustering is not properly explained by the model, then there will be no autocorrelation in the squared standardized residuals.  It is common to do a Ljung-Box test to test for this autocorrelation. Mine are all very small, so we reject the Null and say there is serial correlation. 
+#In conclusion, For standard GARCH model, the normal innovation distribution cannot completely capture the skewness and leptokurtosis of the financial time series, hence the need to use an ARMA-GARCH model 
+```
+
+#Forecast Garch Fit 2
+```{r}
+fb3predict<-ugarchboot(garch3, data = test.ts,n.ahead=10, method=c("Partial","Full")[1])
+plot(fb3predict,which=2)
+
+#50 Day Forecast 
+garch.forecast3 = ugarchforecast(garch3, data = test.ts,n.ahead = 50, n.roll = 0, out.sample = 0)
+plot(garch.forecast3) 
+
+plot(garch.forecast3@forecast$seriesFor) #shows exponential decay?
+
+fitted(garch.forecast3) #means?
+```
+
+We will stick with Garch(1,1) model because We are staying with a GARCH(1,1) model; not because it is the best — it certainly is not.  We are staying with it because it is the most commonly available, the most commonly used, and sometimes good enough. Also, we know that returns do not have a normal distribution, that they have long tails.  It is perfectly reasonable to hypothesize that the long tails are due entirely to garch effects, in which case using a normal distribution in the garch model would be the right thing to do.  
+
+
+#Spectral Analysis - Periodogram & Spectral Density
+Periodogram calculates the significance of different frequencies in time-series data to identify any intrinsic periodic signals. A periodogram is similar to the Fourier Transform, but is optimized for unevenly time-sampled data, and for different shapes in periodic signals. compute I(ν), the squared modulus of the discrete Fourier transform (at frequencies ν = k/n).
+
+$$
+Y_{t} = A_{1}cos(2\pi f_{1}t)+B_{1}sin(2\pi f_{1}t)+A_{2}cos(2\pi f_{2}t)+B_{2}sin(2\pi f_{2}t)+W_{t}
+$$
+
+Spectral Denisty: We have seen that the spectral density gives an alternative view of stationary time series. 
+
+```{r}
+#Time Series
+periodogram(decomp.train.ts$x, main = 'Periodogram of Sales (1992-2014)')
+abline(h=0)
+
+#n
+length(decomp.train.ts$x) #264
+#Cosine curves with n=264 and 12 frequencies and phases (choose 12 because frequency=12) 
+t<-1:264
+cos1<-cos(12*pi*t*12/264)
+cos2<-cos(12*pi*(t*14/264+.3))
+plot(t,cos1,type='o',ylab="Cosines", xlab = "n", main = "Cosine Curves")
+lines(t,cos2,lty='dotted',type='o',pch=4)
+
+#Linear Combination of 2 Cosine Curves
+Y=12*cos1+3*cos2
+plot(t,Y, type='o',ylab=expression(y[t]), xlab = "n", main = "Linear Combination of 2 Cosine Curves")
+
+#Periodogram of the Series: Linear Combination of two Cosine Curves
+periodogram(Y, main = "Periodogram: Linear Combination of 2 Cosine Curves")
+abline(h=0)
+
+#Time Series with hidden Periodicities
+t = 1:264
+integer = sample(48,12)
+freq1 = integer[1]/264
+freq2 = integer[2]/264
+A1 = rnorm(1,0,2)
+B1 = rnorm(1,0,2)
+A2 = rnorm(1,0,3)
+B2 = rnorm(1,0,3)
+w = 12*pi*t
+y = A1*cos(w*freq1) + B1*sin(w*freq1) + A2*cos(w*freq2) + B2*cos(w*freq2) + rnorm(264,0,1)
+
+plot(t,y, type='o',ylab=expression(y[t]), xlab = "n", main = "Time Series with Hidden Periodicities")
+
+#Periodogram of the time series of hidden periodicities
+periodogram(y,main = "Periodogram: Time Series with Hidden Periodicities")
+abline(h=0)
+```
+This can be a helpful tool for identifying the dominant cyclical behavior in a series. Our periodogram identifies the dominant periods (or frequencies) of the time series data. The most dominant period is around frequency 0.05. 
+
+A rough sample estimate of the population spectral density. The estimate is “rough”, in part, because we only use the discrete fundamental harmonic frequencies for the periodogram whereas the spectral density is defined over a continuum of frequencies.The approach we will use is smoothing the periodogram is a parametric estimation approach based on the fact that any stationary time series can be approximated by an AR model of some order (although it might be a high order).  In this approach a suitable AR model is found, and then the spectral density is estimated as the spectral density for that estimated AR model.This method is supported by a theorem which says that the spectral density of any time series process can be approximated by the spectral density of an AR model (of some order, possibly a high one). 
+```{r}
+#parametric approach to smoothing periodogram in order to get spectral density 
+specvalues = spec.ar(train.ts, log ="no", main = "AR(24) Spectrum")
+
+#spectral density for hidden periodicities
+specvals = spec.ar(y, log = "no", main="AR(19) Spectrum")
+
+#spectral density for linear combo of 2 cosine curves
+specvals2 = spec.ar(Y, log = "no")
+```
+
+I was interested in learning about some other forecasting methods, which I've included below. 
+#Exponential smoothing state space model
+```{r}
+ets.fit = ets(train.ts)
+plot(forecast(ets(train.ts), h = 36), main = "Exponential Smoothing: 2015-2017 Forecast")
+```
+Not very good. The forecast is shown in blue with the grey area representing a 95% confidence interval. Just by looking, we see that hte forecast does not match the historical pattern well. 
+
+#Arima (did not use sarima package becasue it would not download in my version of R--error message in appendix)  
+```{r}
+fit6 = Arima(train.ts, order = c(2,1,2), seasonal = list(order = c(1, 2, 1), period = 12))
+plot(forecast(fit6, h=36))
+
+acf(fit6, lag =12)
+
+plot(forecast(fit6, h=60))
+```
+```{r}
+#fit 5
+autoarima.fit = auto.arima(train.ts)
+plot(forecast(auto.arima(train.ts), h=36),main = "Auto.Arima: 2015-2017 Forecast")
+```
+
+```{r}
+#Fit 4 (p=2,d=0,q=2)
+fit4 = Arima(decomp.train.ts$x, c(2, 0, 2),seasonal = list(order = c(1, 2, 1), period = 12))
+summary(fit4)
+
+#prediction
+pred4 <- predict(fit4, decomp.test.ts$x)
+
+#plot data and prediction for 3 years (so forecast 2014-2019)
+plot(forecast(fit4, h = 36))
+```
+
+```{r}
+library(RColorBrewer)
+#fit3
+fit3
+plot(forecast(fit3, h= 36, col = pal[3]))
+```
+Much better! The confidence intervals seem a bit smaller than those for the ETS model, but this is likeley due to this being a better fit. 
+
+```{r}
+#Fit 2 (p=1,d=0,q=2)
+fit2 = Arima(decomp.train.ts$x, c(1, 0, 2),seasonal = list(order = c(1, 1, 1), period = 12))
+summary(fit2)
+
+#prediction
+pred2 <- predict(fit2, decomp.test.ts$x)
+
+#plot data and prediction for 3 years (so forecast 2014-2019)
+plot(forecast(fit2, h = 36))
+```
+
+```{r}
+#Fit 1 (p=1,d=0,q=1)
+fit1 = Arima(decomp.train.ts$x, c(1, 0, 1),seasonal = list(order = c(0, 1, 1), period = 12))
+summary(fit1)
+
+#prediction
+pred1 <- predict(fit1, decomp.test.ts$x)
+
+#plot data and prediction for 3 years (so forecast 2014-2019)
+plot(forecast(fit1, h = 36))
+```
+
+#TBATS
+```{r}
+tbats.fit = tbats(train.ts)
+plot(forecast(tbats(train.ts),h=36),main = "TBATS: 2015-2017 Forecast")
+```
+Not a very good fit. 
+
+#Model Selection
+We will choose model with smallest AIC and BIC values
+```{r}
+#AIC
+barplot(c(ETS = ets.fit$aic, TBATS = tbats.fit$AIC,Auto = autoarima.fit$aic,ARIMA1 = fit1$aic, ARIMA2 = fit3$aic, ARIMA3 = fit4$aic,ARIMA4 = fit6$aic), col = "light blue", ylab = "AIC", main = "AIC Barplot") #smallest is ARIMA4
+```
+We already know TBATS has largest AIC, so we won't consider it when looking at AICc or BIC (also TBATS does not include AICc nor BIC in its fit). 
+```{r}
+#AICc
+barplot(c(ETS = ets.fit$aicc, Auto = autoarima.fit$aicc, ARIMA1 = fit1$aicc,ARIMA2 = fit2$aicc, ARIMA3 = fit4$aicc, ARIMA4 = fit6$aicc), col = "light blue", ylab = "AIC", main = "AICc Barplot") #smallest is ARIMA4
+```
+```{r}
+#BIC
+barplot(c(ETS = ets.fit$bic, Auto = autoarima.fit$bic, ARIMA1 = fit1$bic,ARIMA2 = fit2$bic, ARIMA3 = fit4$bic, ARIMA4 = fit6$bic), col = "light blue", ylab = "BIC", main = "BIC Barplot") #smallest is ARIMA4 == "ARIMA3" in plot.
+```
+ARIMA has smallest AIC and BIC, so we conclude that it's the best forecasting model. 
+
+To improve upon volatility, we will look at its ARCH(1) and GARCH(1,1) models. My best fitted model is seasonal, so ARMA-GARCH model will likely not fit my data well. So, I will model my data using the standard ARMA-GARCH model and a modified ARMA-GARCH model that is equivalent to an ARIMA-GARCH model (if that was a possiblity). 
+
+Afterwards, we will delve into Spectral Analysis for...reasons. We will analyse the Periodogram, and the Spectral Density (smoothed periodogram). 
+
+#ARCH(1) -- dont expect forecasts to be good...that's not the point of garch and arch. 
+```{r}
+train.arch11.fit
+plot(train.arch11.fit, which = 3)
+plot(ugarchforecast(train.arch11.fit, n.ahead = 10), main = "ARCH 10 Day Forecast", which = 1)
+```
+
+#GARCH(1,1) -- dont expect forecasts to be good...that's not the point of garch and arch. 
+```{r}
+train.garch11.fit
+plot(train.garch11.fit, which = 3)
+plot(ugarchforecast(train.garch11.fit, n.ahea = 10), which = 1)
+```
+
+#GARCH(1,1) with ARMA(2,2) == ARIMA-GARCH -- dont expect forecasts to be good, but should be better than above arch/garch 
+```{r}
+#ARIMA-GARCH fit
+arimagarch = ugarchspec(mean.model = list(armaOrder = c(2,2)), 
+               variance.model = list(garchOrder = c(1,1), 
+               model = "sGARCH"), distribution.model = "norm")
+
+arimagarch.fit = ugarchfit(arimagarch, data = train.ts, fit.control=list(scale=TRUE))
+arimagarch.fit
+plot(arimagarch.fit, which = 3)
+```
+```{r}
+#Forecast
+arimagarch.predict<-ugarchboot(arimagarch.fit, data = test.ts,n.ahead=10, method=c("Partial","Full")[1])
+plot(arimagarch.predict,which=2)
+
+#50 Day Forecast 
+arimagarch.forecast = ugarchforecast(arimagarch.fit, data = test.ts,n.ahead = 50, n.roll = 0, out.sample = 0)
+plot(arimagarch.forecast, which = 1) 
+```
+We can see that ARIMA really was our best model, because even ARIMA-GARCH models volatility better and forecasts better (even though that's not the point of GARCH). 
+
+#MonteCarlo
+```{r}
+library(MonteCarlo)
+```
+
+#Now, Periodogram & Spectral Analysis
+```{r}
+#see above. 
+```
+
+
+##Conclusions
+#5) Draw Conclusions
+
+There are some points in forecasting based on ARIM-ARCH/GARCH model that need to take into account.
+Firstly, ARIMA model focuses on analyzing time series linearly and it does not reflect recent changes as new information is available. Therefore, in order to update the model, users need to incorporate new data and estimate parameters again. The variance in ARIMA model is unconditional variance and remains constant. ARIMA is applied for stationary series and therefore, non-stationary series should be transformed (such as log transformation and Box-Cox Transformation).
+Additionally, ARIMA is often used together with ARCH/GARCH model. ARCH/GARCH is a method to measure volatility of the series, or more specifically, to model the noise term of ARIMA model. ARCH/GARCH incorporates new information and analyzes the series based on conditional variances where users can forecast future values with up-to-date information. The forecast interval for the mixed model is closer than that of ARIMA-only model.
+
+??????????????Remember to include statistical uncertainties going along with the estimates??????????????
+
+seasonal timeseries is retail data, which sees spikes in sales during holiday seasons like Christmas. 
+
+##Refrences
+ https://www.statista.com/statistics/269555/percentage-of-product-class-sales-of-walgreens-in-the-us-since-2005/ 
+ https://www.walgreens.com/images/pdfs/state.pdf 
+ https://www.census.gov/retail/marts/www/timeseries.html 
+
+```{r}
+#https://robjhyndman.com/hyndsight/forecasting-weekly-data/
+bestfit <- list(aicc=Inf)
+for(i in 1:25)
+{
+  fit <- auto.arima(u.ts, xreg=fourier(u.ts, K=i), seasonal=FALSE)
+  if(fit$aicc < bestfit$aicc)
+    bestfit <- fit
+  else break;
+}
+fc <- forecast(bestfit, xreg=fourier(u.ts,K=12,h=104))
+plot(fc)
+
+fit4
+fit3
+
+plot(tbats.fit)
+plot(ets.fit)
+#plot(autoarima.fit)
+#plot(fit3)
+```
+
+```{r}
+Model = c("Auto.Arima", "ARIMA1", "ARIMA2", "ARIMA3", "ARIMA4")
+ARIMA = c("(2,0,1)", "(1,0,1)", "(2,0,1)", "(2,0,2)", "(2,1,2)")
+Seasonal = c("(0,0,1)", "(0,1,1)", "(0,2,1)", "(1,2,1)", "(1,2,1)")
+AIC = c("5076.6", "4914.304", "4827.634", "4754.82", "4752.304")
+cbind(Model, ARIMA, Seasonal, AIC)
+as.data.frame(cbind(Model, ARIMA, Seasonal, AIC))
+```
+
+
+
+
+
